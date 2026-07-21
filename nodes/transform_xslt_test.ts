@@ -157,9 +157,12 @@ describe('TransformXslt', () => {
     expect(r2.getError()!.getCode()).toBe('INVALID_XSLT');
   });
 
-  it('bounds a hang that slips past the static check (an exact, literal match="/" template whose body ' +
-    'produces no output — confirmed directly to still hang the engine, indistinguishable from a safe ' +
-    'empty-output template without running it) to the ~5s wall-clock timeout, never an indefinite hang',
+  it('never hangs the caller on a stylesheet that slips past the static check (an exact, literal ' +
+    'match="/" template whose body produces no output — confirmed directly to still hang the underlying ' +
+    'engine\'s own promise, indistinguishable from a safe empty-output template without running it) — ' +
+    'the worker child process exits on its own once its event loop drains (nothing else keeps an ' +
+    'unsettled await alive), which this node reports as a clean INVALID_XSLT rather than waiting out ' +
+    'the full timeout or hanging',
   async () => {
     const xslt = `<?xml version="1.0"?>
 <xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
@@ -170,12 +173,52 @@ describe('TransformXslt', () => {
     const elapsedMs = Date.now() - start;
     expect(result.getError()).toBeDefined();
     expect(result.getError()!.getCode()).toBe('INVALID_XSLT');
-    expect(result.getError()!.getMessage()).toContain('did not complete within');
-    // Bounded: must finish at (approximately) the configured timeout, not
-    // hang past it and not report a phantom timeout instantly.
-    expect(elapsedMs).toBeGreaterThan(4000);
+    expect(result.getError()!.getMessage()).toContain('did not complete');
+    // Bounded well under the ~5s worst-case timeout either way — never an
+    // indefinite hang, and this particular trigger resolves fast.
     expect(elapsedMs).toBeLessThan(8000);
   }, 10000);
+
+  it('bounds a CPU-BOUND hang (not just an async one) to the timeout — a THIRD independent review pass ' +
+    'found that an entirely ordinary triple-nested xsl:for-each over a modest document makes the engine ' +
+    'spin the CPU synchronously for minutes, which starves the event loop badly enough that an in-thread ' +
+    '"Promise.race" timeout literally cannot fire (the callback never gets a turn); only running the ' +
+    'transform in a genuine child process and SIGKILLing it on timeout can preempt this — this test proves ' +
+    'that mechanism actually works, not just the (insufficient) in-thread approach it replaced',
+  async () => {
+    const n = 100;
+    let items = '';
+    for (let i = 0; i < n; i++) items += `<item>${i}</item>`;
+    const bigXml = `<root>${items}</root>`;
+    // Triple-nested for-each, each re-selecting the full item list by
+    // absolute path: O(n^3) iterations — ~1,000,000 at n=100, which the
+    // engine takes well over 5s (measured directly: ~80 items alone already
+    // takes ~5.3s) to even begin approaching, guaranteeing the 5s timeout
+    // fires while it is still genuinely working, not coincidentally close
+    // to finishing.
+    const xslt = `<?xml version="1.0"?>
+<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+<xsl:output method="text"/>
+<xsl:template match="/">
+  <xsl:for-each select="root/item">
+    <xsl:for-each select="/root/item">
+      <xsl:for-each select="/root/item"><x/></xsl:for-each>
+    </xsl:for-each>
+  </xsl:for-each>
+</xsl:template>
+</xsl:stylesheet>`;
+    const start = Date.now();
+    const result = await transformXslt(testContext, req(bigXml, xslt));
+    const elapsedMs = Date.now() - start;
+    expect(result.getError()).toBeDefined();
+    expect(result.getError()!.getCode()).toBe('INVALID_XSLT');
+    expect(result.getError()!.getMessage()).toContain('did not complete within');
+    // Bounded near the configured timeout (plus child-process spawn/kill
+    // overhead) — not the 470+ SECONDS the third review pass observed with
+    // the in-thread-timeout approach this replaced.
+    expect(elapsedMs).toBeGreaterThan(4000);
+    expect(elapsedMs).toBeLessThan(9000);
+  }, 15000);
 
   it('accepts a stylesheet with an explicit root template even when it ALSO declares an unrelated, ' +
     'never-triggered template for another element (a benign template is not mistaken for a dispatch risk)',

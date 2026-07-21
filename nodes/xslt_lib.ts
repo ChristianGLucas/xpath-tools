@@ -6,16 +6,15 @@
 //     (scripts/Utils.js: `const response = await fetch(url)`). A caller-
 //     supplied stylesheet using document('http://internal-host/...') would
 //     make this node perform outbound requests on the caller's behalf — an
-//     SSRF/exfiltration path. patchXsltNetworkFetch() monkey-patches the
-//     exact shared Utils.fetch the library calls (verified: requiring the
-//     same resolved path returns the identical module-cached object xsltjs
-//     itself uses) to always throw, unconditionally, regardless of what URL
+//     SSRF/exfiltration path. The actual transform runs in a child process
+//     (see transform_xslt.ts) which patches the exact shared Utils.fetch the
+//     library calls to always throw, unconditionally, regardless of what URL
 //     a stylesheet requests. Also closes xsl:import/xsl:include of a remote
 //     URL, which goes through the same Utils.fetch.
 //
 //  2. xsltjs's template-DISPATCH machinery (matching a node against the
 //     stylesheet's templates to decide what processes it) reliably HANGS the
-//     process, and — confirmed by two independent rounds of hands-on
+//     process, and — confirmed by three independent rounds of hands-on
 //     testing, not assumed from the first repro found — this is broader and
 //     less predictable than any single static rule can fully enumerate:
 //       (a) an explicit <xsl:apply-templates> anywhere hangs, every axis
@@ -42,53 +41,53 @@
 //     rejectUnsafeDispatch() below is a FAST PATH, not a complete proof of
 //     safety: it statically catches (a), (b), (d), and (e) — the cases that
 //     ARE mechanically detectable from the stylesheet text alone — and
-//     rejects immediately with a clear error. (c), and anything else not
-//     yet discovered, falls through to actually running the engine, which
-//     is why every transform is ALSO wrapped in withTimeout() below: that is
-//     the package's real safety guarantee (bounded latency, never an
-//     indefinite hang), not the static check by itself. Both `axiom.yaml`
-//     and this file's docs describe the guarantee that way — do not
-//     overclaim the static check alone as sufficient in either place.
+//     rejects immediately with a clear error.
 //
-//  3. XSLT.process's XML-declaration handling is driven by XsltContext.output,
+//  3. Crucially, (c) and any other not-yet-found dispatch hang is NOT always
+//     an async/I-O-style hang an in-thread `Promise.race` timeout can bound
+//     — a THIRD review pass found an entirely ordinary nested xsl:for-each
+//     (no exotic construct, just a few hundred items) makes the engine spin
+//     the CPU synchronously for minutes, which starves Node's single-
+//     threaded event loop so thoroughly that even an in-process setTimeout
+//     callback never gets a turn to fire. An in-thread timeout is therefore
+//     NOT a real bound on this class of hang — only an OS signal delivered
+//     to a SEPARATE process can preempt synchronous CPU-bound work. This is
+//     why transform_xslt.ts runs the actual XSLT.process(...) call in a
+//     child process and SIGKILLs it on timeout, the same reasoning (a
+//     different specific problem, ESM/vm-sandbox interop) that already put
+//     ValidateXsd's libxml2-wasm call in a child process. The functions
+//     below (rejectUnsafeDispatch, detectOutputSpec, normalizeOutput) are
+//     the FAST, synchronous, never-hanging pre/post-processing that still
+//     runs in this process; the actual transform does not.
+//
+//  4. XSLT.process's XML-declaration handling is driven by XsltContext.output,
 //     a STATIC (class-level, cross-invocation) field only ever set as a side
 //     effect of encountering an <xsl:output> element — meaning (a) a
 //     stylesheet with method="text"/"html" still gets an XML declaration
 //     prepended because the prepend logic never checks method, and (b) a
 //     stylesheet with NO <xsl:output> element at all can inherit a STALE
 //     decl left over from a PRIOR, unrelated call in the same process, since
-//     the field is never reset. detectOutputMethod() independently reads
-//     the caller's own <xsl:output> (if any) via a namespace-aware XPath
-//     query — never touching the library's shared static state — and
+//     the field is never reset. detectOutputSpec() independently reads the
+//     caller's own <xsl:output> (if any) via a namespace-aware XPath query —
+//     never touching the library's shared static state — and
 //     normalizeOutput() reconstructs the declaration (or omits it) itself
 //     from that independent reading, making the result depend only on this
-//     call's own input.
+//     call's own input. (This one is unaffected by running the transform in
+//     a child process — normalizeOutput still runs in the parent, on the
+//     child's returned output string.)
 
 import { evalXPath, NodeError } from './lib';
 
 const XSL_NS = 'http://www.w3.org/1999/XSL/Transform';
-
-let networkPatched = false;
-
-/** Idempotently patch xsltjs's shared Utils.fetch to always fail closed. Safe to call on every invocation. */
-export function patchXsltNetworkFetch(): void {
-  if (networkPatched) return;
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const UtilsMod = require('xsltjs/scripts/Utils.js');
-  const Utils = UtilsMod.Utils;
-  Utils.fetch = async (url: string) => {
-    throw new Error(`network/document() access is disabled for this node: blocked fetch of "${url}"`);
-  };
-  networkPatched = true;
-}
 
 /**
  * Statically reject the mechanically-detectable ways to reach xsltjs's
  * hanging template-dispatch machinery (see the module doc comment for the
  * full, hands-on-tested list). This is a FAST PATH that catches the common
  * cases immediately — it is NOT a proof the engine will not still hang on
- * something it doesn't catch (see withTimeout, which is the package's real
- * safety net). Run before the engine ever sees the stylesheet.
+ * something it doesn't catch (see transform_xslt.ts's child-process
+ * worker + SIGKILL timeout, which is the package's real safety net for
+ * that). Run before the engine ever sees the stylesheet.
  */
 export function rejectUnsafeDispatch(xsltDoc: any): void {
   const applyTemplates = evalXPath(xsltDoc, '//xsl:apply-templates', { xsl: XSL_NS });
@@ -176,27 +175,4 @@ export function normalizeOutput(rawOutput: string, spec: OutputSpec): string {
     return `<?xml version="1.0" encoding="${spec.encoding}"?>\n${body}`;
   }
   return body;
-}
-
-/**
- * Race `p` against a hard wall-clock timeout, rejecting with an
- * INVALID_XSLT NodeError if `p` has not settled by `ms`. This — not
- * rejectUnsafeDispatch's static check — is this package's REAL guarantee
- * against xsltjs's dispatch hang: rejectUnsafeDispatch catches the
- * mechanically-detectable trigger cases immediately (see its doc comment),
- * but at least one known trigger (an exact, literal root template whose
- * body produces no output) cannot be told apart from a safe empty-output
- * template by any static check, and there may be others not yet found in
- * this "work in progress" engine. Whatever gets through the static check
- * and still hangs is bounded here to `ms` instead of hanging the caller
- * indefinitely.
- */
-export function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
-  let timer: ReturnType<typeof setTimeout>;
-  const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => {
-      reject(new NodeError('INVALID_XSLT', `XSLT transform did not complete within ${ms}ms`));
-    }, ms);
-  });
-  return Promise.race([p, timeout]).finally(() => clearTimeout(timer));
 }
