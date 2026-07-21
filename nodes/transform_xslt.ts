@@ -6,7 +6,13 @@ import { patchXsltNetworkFetch, rejectUnsafeDispatch, detectOutputSpec, normaliz
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { XSLT } = require('xsltjs');
 
-const TRANSFORM_TIMEOUT_MS = 15000;
+// 5s: comfortably generous for any real transform (every legitimate
+// transform in this package's own tests completes in well under 100ms) while
+// keeping the worst-case wait bounded for a stylesheet that slips past
+// rejectUnsafeDispatch's static check and still hangs the engine — see
+// withTimeout's doc comment in xslt_lib.ts for why that residual case exists
+// and cannot be closed by a static check alone.
+const TRANSFORM_TIMEOUT_MS = 5000;
 
 /**
  * Transform an XML document with a caller-supplied XSLT 1.0 stylesheet,

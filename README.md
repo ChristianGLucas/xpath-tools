@@ -41,23 +41,32 @@ queries. See `axiom.yaml` for full per-node documentation.
   fetch, verified by direct inspection and live testing (not just library claims).
 - Input size, XPath expression length, namespace-map size, and XML nesting depth
   are all bounded.
-- A stylesheet that could reach the underlying XSLT engine's (`xsltjs`, a
-  self-described work-in-progress) hanging template-dispatch machinery is
-  rejected outright rather than run. Found and confirmed by direct testing,
-  not assumed — and the guard covers BOTH ways to reach it: an explicit
-  `xsl:apply-templates` anywhere, and simply omitting a top-level
-  `<xsl:template match="/">` (which forces the engine's own implicit
-  top-level dispatch call, an equally-hanging path with zero
-  `xsl:apply-templates` in the source — a fix that only scanned for the
-  literal token would have missed this).
+- The underlying XSLT engine (`xsltjs`, a self-described work-in-progress) can
+  hang indefinitely in its template-dispatch machinery. Two rounds of direct,
+  hands-on testing (not assumed) found this reachable more ways than any one
+  static rule can fully enumerate — explicit `xsl:apply-templates`; a missing
+  literal `<xsl:template match="/">`; the XSL namespace bound to a prefix
+  other than the exact literal `xsl`; even, in one confirmed case, an exact
+  `match="/"` template whose body simply produces no output (indistinguishable
+  from a safe empty-output template without actually running it). `TransformXslt`
+  statically rejects every mechanically-detectable trigger immediately, AND
+  wraps every transform in a ~5s wall-clock timeout as the real backstop — so
+  a construct that slips past the static check still fails cleanly with a
+  structured error instead of hanging the caller. See `axiom.yaml`'s
+  `TransformXslt` description for the exact, current list of what's statically
+  rejected.
 - Malformed XML/XPath/XSLT/XSD always returns a structured error, never a crash.
 
 ## Known engine limitations (tested, not guessed)
 
-- Every stylesheet passed to `TransformXslt` MUST have an explicit
-  `<xsl:template match="/">` and MUST NOT use `xsl:apply-templates` anywhere
-  (see above) — use `xsl:for-each` + `xsl:call-template` instead, neither of
-  which triggers template dispatch.
+- `TransformXslt` statically rejects: `xsl:apply-templates` anywhere; no
+  top-level `<xsl:template match="/">` with that exact literal match value
+  (whitespace or a `|`-combined pattern does not count); and the XSL
+  namespace bound to any prefix other than the exact literal `xsl`. Use
+  `xsl:for-each` + `xsl:call-template` instead of apply-templates, neither of
+  which triggers template dispatch. A ~5s timeout bounds anything that slips
+  past this check and still hangs the engine (see above) — this is the
+  package's actual safety guarantee, not the static check alone.
 - `xsl:value-of select="."` (the bare self-reference shorthand) returns the
   escaped node markup instead of the text value, due to a narrow bug in the
   underlying engine's context handling — use `select="self::node()"` or

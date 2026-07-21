@@ -100,19 +100,24 @@ nodes:
         fetched). A malformed stylesheet or a runtime transform error is
         INVALID_XSLT. Two tested engine limitations, not spec gaps of ours:
         (1) the underlying engine's template-DISPATCH machinery (matching a
-        node against the stylesheet's templates) hangs indefinitely rather
-        than completing, reachable two ways — an explicit
-        xsl:apply-templates anywhere, or simply omitting a top-level
-        <xsl:template match="/"> (which forces the processor's own implicit
-        entry-point dispatch, hitting the identical hang even with zero
-        xsl:apply-templates in the source). Both are rejected outright
-        (INVALID_XSLT) before the engine ever runs: every stylesheet MUST
-        have an explicit <xsl:template match="/"> and MUST NOT use
-        xsl:apply-templates anywhere — rewrite using xsl:for-each and
-        xsl:call-template instead, neither of which triggers dispatch. (2)
-        xsl:value-of select="." (the bare self shorthand) returns the
-        escaped node markup instead of its text — use select="self::node()"
-        or select="text()", both of which work correctly.
+        node against the stylesheet's templates) can hang indefinitely
+        rather than completing. The mechanically-detectable trigger cases —
+        xsl:apply-templates anywhere; no top-level <xsl:template match="/">
+        whose match value is the exact literal string "/"; the XSL
+        namespace bound to anything other than the exact literal prefix
+        "xsl" — are rejected outright (INVALID_XSLT) before the engine ever
+        runs: use xsl:for-each and xsl:call-template instead of
+        apply-templates, neither of which triggers dispatch. This node's
+        real guarantee against the hang is broader than that static check,
+        though: EVERY transform is also wall-clock bounded (~5s) — even a
+        construct not statically caught (e.g. an exact, literal
+        match="/" template whose body happens to produce no output, which
+        is indistinguishable from a safe empty-output template without
+        actually running it) fails cleanly with INVALID_XSLT within the
+        bound rather than hanging the caller. (2) xsl:value-of select="."
+        (the bare self shorthand) returns the escaped node markup instead
+        of its text — use select="self::node()" or select="text()", both of
+        which work correctly.
       input: TransformXsltRequest
       output: TransformXsltResult
     - name: ValidateXsd

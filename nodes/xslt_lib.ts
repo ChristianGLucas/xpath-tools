@@ -15,28 +15,40 @@
 //
 //  2. xsltjs's template-DISPATCH machinery (matching a node against the
 //     stylesheet's templates to decide what processes it) reliably HANGS the
-//     process. This is reachable two ways, both confirmed empirically by
-//     direct testing (not assumed from the first repro found): (a) an
-//     explicit <xsl:apply-templates> anywhere — every axis variant tried
-//     (default, explicit child-axis select, descendant-axis select) hung;
-//     and (b) the XSLT-spec-mandated IMPLICIT top-level call the processor
-//     makes when a stylesheet has no explicit `<xsl:template match="/">` —
-//     confirmed to hang identically with a stylesheet containing only
-//     `<xsl:template match="item">` and no root template. (a) is reachable
-//     with zero explicit apply-templates token in the source text, which is
-//     why a naive text/element scan for that literal construct alone is
-//     NOT a sufficient guard — an ordinary, unremarkable "template-per-
-//     element-type, no explicit root template" authoring style hits it too.
+//     process, and — confirmed by two independent rounds of hands-on
+//     testing, not assumed from the first repro found — this is broader and
+//     less predictable than any single static rule can fully enumerate:
+//       (a) an explicit <xsl:apply-templates> anywhere hangs, every axis
+//           variant tried.
+//       (b) a stylesheet with NO top-level <xsl:template match="/"> at all
+//           hangs via the processor's own implicit top-level dispatch call
+//           — with ZERO literal apply-templates text in the source.
+//       (c) even an EXACT, literal <xsl:template match="/"> still hangs if
+//           its body produces no output (empty, self-closing, comment-only,
+//           or a false xsl:if) — confirmed directly, twice.
+//       (d) an otherwise-identical, otherwise-safe stylesheet hangs if the
+//           XSL namespace is bound to any prefix other than the literal
+//           "xsl" (a different prefix, or a default/unprefixed binding) —
+//           both are spec-legal XSLT, but the engine appears to key
+//           dispatch off the literal prefix text, not the namespace URI.
+//       (e) match="/" surrounded by whitespace, or combined with another
+//           alternative via "|" (e.g. match="/|foo"), is NOT treated as a
+//           root template by the engine even though it is spec-legal —
+//           confirmed to hang despite a real, output-producing body.
 //     xsl:for-each / xsl:copy-of / xsl:call-template never trigger
-//     match-based dispatch (confirmed working in tests), so blocking BOTH
-//     entry points into dispatch — no xsl:apply-templates anywhere, AND a
-//     mandatory explicit `<xsl:template match="/">` (or a match pattern
-//     whose "|"-separated alternatives include "/") as the processing entry
-//     point — closes every path into the buggy machinery for how this node
-//     actually invokes the engine (always starting from the document root).
-//     rejectUnsafeDispatch() enforces both, failing fast with a clear error
-//     instead of ever invoking the engine on either — turning an indefinite
-//     hang into an immediate, honest "unsupported" response.
+//     match-based dispatch (confirmed working in every test). Given (c)
+//     cannot be distinguished from a safe empty-output template by any
+//     static check short of actually interpreting the stylesheet,
+//     rejectUnsafeDispatch() below is a FAST PATH, not a complete proof of
+//     safety: it statically catches (a), (b), (d), and (e) — the cases that
+//     ARE mechanically detectable from the stylesheet text alone — and
+//     rejects immediately with a clear error. (c), and anything else not
+//     yet discovered, falls through to actually running the engine, which
+//     is why every transform is ALSO wrapped in withTimeout() below: that is
+//     the package's real safety guarantee (bounded latency, never an
+//     indefinite hang), not the static check by itself. Both `axiom.yaml`
+//     and this file's docs describe the guarantee that way — do not
+//     overclaim the static check alone as sufficient in either place.
 //
 //  3. XSLT.process's XML-declaration handling is driven by XsltContext.output,
 //     a STATIC (class-level, cross-invocation) field only ever set as a side
@@ -71,12 +83,12 @@ export function patchXsltNetworkFetch(): void {
 }
 
 /**
- * Reject a stylesheet that could reach xsltjs's hanging template-dispatch
- * machinery by EITHER known path (see the module doc comment): an explicit
- * <xsl:apply-templates> anywhere, or the absence of an explicit
- * `<xsl:template match="/">` (which forces the processor's own implicit,
- * equally-hanging top-level dispatch call). Run before the engine ever sees
- * the stylesheet.
+ * Statically reject the mechanically-detectable ways to reach xsltjs's
+ * hanging template-dispatch machinery (see the module doc comment for the
+ * full, hands-on-tested list). This is a FAST PATH that catches the common
+ * cases immediately — it is NOT a proof the engine will not still hang on
+ * something it doesn't catch (see withTimeout, which is the package's real
+ * safety net). Run before the engine ever sees the stylesheet.
  */
 export function rejectUnsafeDispatch(xsltDoc: any): void {
   const applyTemplates = evalXPath(xsltDoc, '//xsl:apply-templates', { xsl: XSL_NS });
@@ -88,26 +100,41 @@ export function rejectUnsafeDispatch(xsltDoc: any): void {
     );
   }
 
-  const matchAttrs = evalXPath(
-    xsltDoc,
-    '/xsl:stylesheet/xsl:template/@match|/xsl:transform/xsl:template/@match',
-    { xsl: XSL_NS },
-  );
-  const hasRootTemplate =
-    Array.isArray(matchAttrs) &&
-    matchAttrs.some((attr: any) =>
-      String(attr.value)
-        .split('|')
-        .map((alt) => alt.trim())
-        .includes('/'),
+  // The engine's dispatch appears to key off the literal "xsl" prefix text,
+  // not the namespace URI — a different prefix or a default/unprefixed
+  // binding for the XSL namespace hangs even with an otherwise-safe,
+  // output-producing root template (confirmed by direct testing). Require
+  // the stylesheet's own root element to literally use "xsl:stylesheet" or
+  // "xsl:transform", not merely something namespace-equivalent.
+  const root = xsltDoc.documentElement;
+  const rootIsXslPrefixed =
+    !!root && root.prefix === 'xsl' && root.namespaceURI === XSL_NS && (root.localName === 'stylesheet' || root.localName === 'transform');
+  if (!rootIsXslPrefixed) {
+    throw new NodeError(
+      'INVALID_XSLT',
+      'the stylesheet root must be literally <xsl:stylesheet> or <xsl:transform> using the exact ' +
+        'prefix "xsl" for the XSL namespace — a different prefix or a default/unprefixed namespace ' +
+        'binding is spec-legal XSLT but hangs this package\'s engine.',
     );
+  }
+
+  // The engine only recognizes a root template whose match attribute is the
+  // EXACT literal string "/" — surrounding whitespace or a "|"-combined
+  // alternative pattern (e.g. "/|foo", spec-legal and equivalent XSLT) is
+  // NOT treated as a root entry point and hangs despite passing a more
+  // lenient text check (confirmed by direct testing) — so no leniency here.
+  const matchAttrs = evalXPath(xsltDoc, '/xsl:stylesheet/xsl:template/@match|/xsl:transform/xsl:template/@match', {
+    xsl: XSL_NS,
+  });
+  const hasRootTemplate = Array.isArray(matchAttrs) && matchAttrs.some((attr: any) => attr.value === '/');
   if (!hasRootTemplate) {
     throw new NodeError(
       'INVALID_XSLT',
-      'this stylesheet has no top-level <xsl:template match="/">. Without one, the engine falls back ' +
-        'to its own implicit template dispatch for the document root, which hangs rather than ' +
-        'executing (the same underlying issue as xsl:apply-templates) — add an explicit ' +
-        '<xsl:template match="/"> as the stylesheet\'s entry point.',
+      'this stylesheet has no top-level <xsl:template match="/"> (the match value must be the exact ' +
+        'literal string "/" — not surrounded by whitespace, and not combined with another pattern via ' +
+        '"|"). Without one, the engine falls back to its own implicit template dispatch for the ' +
+        'document root, which hangs rather than executing (the same underlying issue as ' +
+        'xsl:apply-templates).',
     );
   }
 }
@@ -153,11 +180,16 @@ export function normalizeOutput(rawOutput: string, spec: OutputSpec): string {
 
 /**
  * Race `p` against a hard wall-clock timeout, rejecting with an
- * INVALID_XSLT NodeError if `p` has not settled by `ms`. Defense-in-depth
- * against any not-yet-discovered hang in xsltjs beyond the known
- * apply-templates case (which rejectApplyTemplates already screens out
- * before this ever runs) — converts "the node never responds" into a
- * bounded, structured failure.
+ * INVALID_XSLT NodeError if `p` has not settled by `ms`. This — not
+ * rejectUnsafeDispatch's static check — is this package's REAL guarantee
+ * against xsltjs's dispatch hang: rejectUnsafeDispatch catches the
+ * mechanically-detectable trigger cases immediately (see its doc comment),
+ * but at least one known trigger (an exact, literal root template whose
+ * body produces no output) cannot be told apart from a safe empty-output
+ * template by any static check, and there may be others not yet found in
+ * this "work in progress" engine. Whatever gets through the static check
+ * and still hangs is bounded here to `ms` instead of hanging the caller
+ * indefinitely.
  */
 export function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   let timer: ReturnType<typeof setTimeout>;

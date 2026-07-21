@@ -112,6 +112,71 @@ describe('TransformXslt', () => {
     expect(result.getError()!.getMessage()).toContain('match="/"');
   }, 10000);
 
+  it('rejects a match="/" pattern that is whitespace-padded or "|"-combined with another alternative — ' +
+    'the engine does not treat either as a root template despite it being spec-legal XSLT (found by a ' +
+    'second independent review pass, reproduced directly: both hang for the full engine timeout)',
+  async () => {
+    const padded = `<?xml version="1.0"?>
+<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+<xsl:output method="text"/>
+<xsl:template match=" / "><xsl:for-each select="//item"><xsl:value-of select="text()"/>,</xsl:for-each></xsl:template>
+</xsl:stylesheet>`;
+    const r1 = await transformXslt(testContext, req(XML, padded));
+    expect(r1.getError()).toBeDefined();
+    expect(r1.getError()!.getCode()).toBe('INVALID_XSLT');
+
+    const combined = `<?xml version="1.0"?>
+<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+<xsl:output method="text"/>
+<xsl:template match="/|foo"><xsl:for-each select="//item"><xsl:value-of select="text()"/>,</xsl:for-each></xsl:template>
+</xsl:stylesheet>`;
+    const r2 = await transformXslt(testContext, req(XML, combined));
+    expect(r2.getError()).toBeDefined();
+    expect(r2.getError()!.getCode()).toBe('INVALID_XSLT');
+  });
+
+  it('rejects a stylesheet binding the XSL namespace to a non-"xsl" prefix (or a default/unprefixed ' +
+    'binding) — spec-legal XSLT, but the engine\'s dispatch hangs on it regardless of namespace-URI ' +
+    'correctness (found by a second independent review pass, reproduced directly)', async () => {
+    const customPrefix = `<?xml version="1.0"?>
+<xslt:stylesheet version="1.0" xmlns:xslt="http://www.w3.org/1999/XSL/Transform">
+<xslt:output method="text"/>
+<xslt:template match="/"><xslt:for-each select="//item"><xslt:value-of select="text()"/>,</xslt:for-each></xslt:template>
+</xslt:stylesheet>`;
+    const r1 = await transformXslt(testContext, req(XML, customPrefix));
+    expect(r1.getError()).toBeDefined();
+    expect(r1.getError()!.getCode()).toBe('INVALID_XSLT');
+
+    const defaultNs = `<?xml version="1.0"?>
+<stylesheet version="1.0" xmlns="http://www.w3.org/1999/XSL/Transform">
+<output method="text"/>
+<template match="/"><for-each select="//item"><value-of select="text()"/>,</for-each></template>
+</stylesheet>`;
+    const r2 = await transformXslt(testContext, req(XML, defaultNs));
+    expect(r2.getError()).toBeDefined();
+    expect(r2.getError()!.getCode()).toBe('INVALID_XSLT');
+  });
+
+  it('bounds a hang that slips past the static check (an exact, literal match="/" template whose body ' +
+    'produces no output — confirmed directly to still hang the engine, indistinguishable from a safe ' +
+    'empty-output template without running it) to the ~5s wall-clock timeout, never an indefinite hang',
+  async () => {
+    const xslt = `<?xml version="1.0"?>
+<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+<xsl:template match="/"></xsl:template>
+</xsl:stylesheet>`;
+    const start = Date.now();
+    const result = await transformXslt(testContext, req(XML, xslt));
+    const elapsedMs = Date.now() - start;
+    expect(result.getError()).toBeDefined();
+    expect(result.getError()!.getCode()).toBe('INVALID_XSLT');
+    expect(result.getError()!.getMessage()).toContain('did not complete within');
+    // Bounded: must finish at (approximately) the configured timeout, not
+    // hang past it and not report a phantom timeout instantly.
+    expect(elapsedMs).toBeGreaterThan(4000);
+    expect(elapsedMs).toBeLessThan(8000);
+  }, 10000);
+
   it('accepts a stylesheet with an explicit root template even when it ALSO declares an unrelated, ' +
     'never-triggered template for another element (a benign template is not mistaken for a dispatch risk)',
   async () => {
