@@ -1,7 +1,7 @@
 import { TransformXsltRequest, TransformXsltResult } from '../gen/messages_pb';
 import { AxiomContext } from '../gen/axiomContext';
 import { parseXmlDom, mapToObject, buildErrorMsg, MAX_XSLT_BYTES, NodeError } from './lib';
-import { patchXsltNetworkFetch, rejectApplyTemplates, detectOutputSpec, normalizeOutput, withTimeout } from './xslt_lib';
+import { patchXsltNetworkFetch, rejectUnsafeDispatch, detectOutputSpec, normalizeOutput, withTimeout } from './xslt_lib';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { XSLT } = require('xsltjs');
@@ -35,7 +35,7 @@ export async function transformXslt(ax: AxiomContext, input: TransformXsltReques
       throw e;
     }
 
-    rejectApplyTemplates(xsltDoc);
+    rejectUnsafeDispatch(xsltDoc);
     const spec = detectOutputSpec(xsltDoc);
     const params = mapToObject(input.getParamsMap());
 

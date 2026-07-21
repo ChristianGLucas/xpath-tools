@@ -41,16 +41,23 @@ queries. See `axiom.yaml` for full per-node documentation.
   fetch, verified by direct inspection and live testing (not just library claims).
 - Input size, XPath expression length, namespace-map size, and XML nesting depth
   are all bounded.
-- A stylesheet using `xsl:apply-templates` is rejected outright rather than run —
-  the underlying XSLT engine (`xsltjs`, a self-described work-in-progress) hangs
-  indefinitely on that construct; this was found and confirmed by direct testing,
-  not assumed.
+- A stylesheet that could reach the underlying XSLT engine's (`xsltjs`, a
+  self-described work-in-progress) hanging template-dispatch machinery is
+  rejected outright rather than run. Found and confirmed by direct testing,
+  not assumed — and the guard covers BOTH ways to reach it: an explicit
+  `xsl:apply-templates` anywhere, and simply omitting a top-level
+  `<xsl:template match="/">` (which forces the engine's own implicit
+  top-level dispatch call, an equally-hanging path with zero
+  `xsl:apply-templates` in the source — a fix that only scanned for the
+  literal token would have missed this).
 - Malformed XML/XPath/XSLT/XSD always returns a structured error, never a crash.
 
 ## Known engine limitations (tested, not guessed)
 
-- `xsl:apply-templates` is unsupported (see above) — use `xsl:for-each` +
-  `xsl:call-template` instead.
+- Every stylesheet passed to `TransformXslt` MUST have an explicit
+  `<xsl:template match="/">` and MUST NOT use `xsl:apply-templates` anywhere
+  (see above) — use `xsl:for-each` + `xsl:call-template` instead, neither of
+  which triggers template dispatch.
 - `xsl:value-of select="."` (the bare self-reference shorthand) returns the
   escaped node markup instead of the text value, due to a narrow bug in the
   underlying engine's context handling — use `select="self::node()"` or

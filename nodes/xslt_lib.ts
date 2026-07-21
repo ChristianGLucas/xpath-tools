@@ -13,14 +13,30 @@
 //     a stylesheet requests. Also closes xsl:import/xsl:include of a remote
 //     URL, which goes through the same Utils.fetch.
 //
-//  2. xsltjs's <xsl:apply-templates> reliably HANGS the process — confirmed
-//     empirically with the default axis, an explicit child-axis select, and
-//     a descendant-axis select; none ever resolved or rejected within a 15s
-//     wait. This is arguably the single most common XSLT construct, so
-//     rejectApplyTemplates() statically scans the parsed stylesheet and
-//     fails fast with a clear error instead of ever invoking the engine on
-//     it — turning an indefinite hang into an immediate, honest
-//     "unsupported" response.
+//  2. xsltjs's template-DISPATCH machinery (matching a node against the
+//     stylesheet's templates to decide what processes it) reliably HANGS the
+//     process. This is reachable two ways, both confirmed empirically by
+//     direct testing (not assumed from the first repro found): (a) an
+//     explicit <xsl:apply-templates> anywhere — every axis variant tried
+//     (default, explicit child-axis select, descendant-axis select) hung;
+//     and (b) the XSLT-spec-mandated IMPLICIT top-level call the processor
+//     makes when a stylesheet has no explicit `<xsl:template match="/">` —
+//     confirmed to hang identically with a stylesheet containing only
+//     `<xsl:template match="item">` and no root template. (a) is reachable
+//     with zero explicit apply-templates token in the source text, which is
+//     why a naive text/element scan for that literal construct alone is
+//     NOT a sufficient guard — an ordinary, unremarkable "template-per-
+//     element-type, no explicit root template" authoring style hits it too.
+//     xsl:for-each / xsl:copy-of / xsl:call-template never trigger
+//     match-based dispatch (confirmed working in tests), so blocking BOTH
+//     entry points into dispatch — no xsl:apply-templates anywhere, AND a
+//     mandatory explicit `<xsl:template match="/">` (or a match pattern
+//     whose "|"-separated alternatives include "/") as the processing entry
+//     point — closes every path into the buggy machinery for how this node
+//     actually invokes the engine (always starting from the document root).
+//     rejectUnsafeDispatch() enforces both, failing fast with a clear error
+//     instead of ever invoking the engine on either — turning an indefinite
+//     hang into an immediate, honest "unsupported" response.
 //
 //  3. XSLT.process's XML-declaration handling is driven by XsltContext.output,
 //     a STATIC (class-level, cross-invocation) field only ever set as a side
@@ -55,17 +71,43 @@ export function patchXsltNetworkFetch(): void {
 }
 
 /**
- * Reject a stylesheet containing <xsl:apply-templates> anywhere, before the
- * engine ever runs on it (see the module doc comment: this reliably hangs
- * the process in xsltjs 0.0.75).
+ * Reject a stylesheet that could reach xsltjs's hanging template-dispatch
+ * machinery by EITHER known path (see the module doc comment): an explicit
+ * <xsl:apply-templates> anywhere, or the absence of an explicit
+ * `<xsl:template match="/">` (which forces the processor's own implicit,
+ * equally-hanging top-level dispatch call). Run before the engine ever sees
+ * the stylesheet.
  */
-export function rejectApplyTemplates(xsltDoc: any): void {
-  const matches = evalXPath(xsltDoc, '//xsl:apply-templates', { xsl: XSL_NS });
-  if (Array.isArray(matches) && matches.length > 0) {
+export function rejectUnsafeDispatch(xsltDoc: any): void {
+  const applyTemplates = evalXPath(xsltDoc, '//xsl:apply-templates', { xsl: XSL_NS });
+  if (Array.isArray(applyTemplates) && applyTemplates.length > 0) {
     throw new NodeError(
       'INVALID_XSLT',
       'xsl:apply-templates is not supported by this package\'s XSLT engine (it hangs rather than ' +
         'executing) — rewrite the stylesheet using xsl:for-each and xsl:call-template instead.',
+    );
+  }
+
+  const matchAttrs = evalXPath(
+    xsltDoc,
+    '/xsl:stylesheet/xsl:template/@match|/xsl:transform/xsl:template/@match',
+    { xsl: XSL_NS },
+  );
+  const hasRootTemplate =
+    Array.isArray(matchAttrs) &&
+    matchAttrs.some((attr: any) =>
+      String(attr.value)
+        .split('|')
+        .map((alt) => alt.trim())
+        .includes('/'),
+    );
+  if (!hasRootTemplate) {
+    throw new NodeError(
+      'INVALID_XSLT',
+      'this stylesheet has no top-level <xsl:template match="/">. Without one, the engine falls back ' +
+        'to its own implicit template dispatch for the document root, which hangs rather than ' +
+        'executing (the same underlying issue as xsl:apply-templates) — add an explicit ' +
+        '<xsl:template match="/"> as the stylesheet\'s entry point.',
     );
   }
 }

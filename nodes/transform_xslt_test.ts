@@ -97,6 +97,35 @@ describe('TransformXslt', () => {
     expect(result.getError()!.getMessage()).toContain('apply-templates');
   }, 10000);
 
+  it('rejects a stylesheet with NO top-level <xsl:template match="/"> instead of hanging — the engine\'s ' +
+    'own implicit top-level dispatch hits the identical hang as xsl:apply-templates even with zero ' +
+    'occurrences of that literal token in the source (found by independent review, reproduced directly)',
+  async () => {
+    const xslt = `<?xml version="1.0"?>
+<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+<xsl:output method="text"/>
+<xsl:template match="item"><xsl:value-of select="text()"/>,</xsl:template>
+</xsl:stylesheet>`;
+    const result = await transformXslt(testContext, req(XML, xslt));
+    expect(result.getError()).toBeDefined();
+    expect(result.getError()!.getCode()).toBe('INVALID_XSLT');
+    expect(result.getError()!.getMessage()).toContain('match="/"');
+  }, 10000);
+
+  it('accepts a stylesheet with an explicit root template even when it ALSO declares an unrelated, ' +
+    'never-triggered template for another element (a benign template is not mistaken for a dispatch risk)',
+  async () => {
+    const xslt = `<?xml version="1.0"?>
+<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+<xsl:output method="text"/>
+<xsl:template match="/"><xsl:for-each select="//item"><xsl:value-of select="text()"/>,</xsl:for-each></xsl:template>
+<xsl:template match="item">UNUSED</xsl:template>
+</xsl:stylesheet>`;
+    const result = await transformXslt(testContext, req(XML, xslt));
+    expect(result.getError()).toBeUndefined();
+    expect(result.getOutput().trim()).toBe('A,B,');
+  });
+
   it('blocks a stylesheet document() call instead of performing a network fetch (SSRF guard)', async () => {
     const xslt = `<?xml version="1.0"?>
 <xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
