@@ -1,0 +1,291 @@
+// This file defines the data contracts (messages) for your Axiom package.
+// Every node's --input and --output refers to a message defined here.
+//
+// Run `axiom create message <Name>` to scaffold a new message below.
+// Run `axiom generate` to compile these definitions into language bindings in gen/.
+//
+// DOCUMENTATION
+//   Comments written directly above a message or field declaration are extracted
+//   automatically at publish time and shown in the Axiom registry as documentation.
+//   Write your descriptions there — no separate doc files needed.
+//
+//   Leading comment  (no blank line before the declaration) → registry description ✓
+//   Detached comment (blank line before the declaration)    → ignored by registry  ✗
+//
+// This file is yours to edit. Axiom only appends new message blocks — it never
+// overwrites or removes content you have written.
+
+syntax = "proto3";
+
+package christiangeorgelucas.xpath_tools;
+
+// A structured, deterministic failure. Unset on success.
+message Error {
+  // Stable machine-readable code, one of:
+  //   INVALID_XML       — the `xml` input is not well-formed XML, or its
+  //                        DOCTYPE was rejected (see the package-level XXE
+  //                        note: DTD/external-entity resolution is always
+  //                        disabled, so a document requiring one to parse
+  //                        is reported here, not fetched).
+  //   INVALID_XPATH      — the `xpath` expression failed to compile (XPath
+  //                        1.0 syntax error, or it does not evaluate to the
+  //                        result type this node requires).
+  //   INVALID_XSLT       — the `xslt` stylesheet is not well-formed XML or
+  //                        not a valid XSLT 1.0 stylesheet.
+  //   INVALID_XSD        — the `xsd` schema is not well-formed XML or not a
+  //                        valid XML Schema document.
+  //   INVALID_ARGUMENT   — a non-content argument is wrong (e.g. an empty
+  //                        `xpath`, a namespace prefix map entry with an
+  //                        empty prefix or URI, or an unresolvable prefix
+  //                        used in the expression).
+  //   TOO_LARGE          — an input exceeds its documented size bound.
+  string code = 1;
+  // Human-readable detail. Always non-empty when `code` is set.
+  string message = 2;
+}
+
+// ── Shared query fields (duplicated per request message, not embedded —
+//    proto3 has no inheritance) ──────────────────────────────────────────
+//
+//   xml        — the source XML document text. Parsed with a DTD/external-
+//                entity loading permanently disabled: no DOCTYPE-declared
+//                internal or external entity is ever expanded, and no
+//                external DTD/schema/document() URL is ever fetched — this
+//                closes XXE and billion-laughs at the parser, unconditionally,
+//                for every node in this package. Capped at 3 MB (comfortably
+//                under Axiom's ~4 MiB node transport limit).
+//   xpath      — an XPath 1.0 expression, capped at 10,000 characters.
+//   namespaces — an optional prefix -> namespace-URI map so `xpath` can use
+//                namespace-qualified steps (e.g. {"a": "urn:example:a"} lets
+//                the expression use "a:Foo"). Capped at 50 entries. A prefix
+//                used in `xpath` but absent from this map, or a mapped
+//                prefix never used in `xpath`, is not itself an error — only
+//                an unresolvable prefix actually referenced fails as
+//                INVALID_ARGUMENT.
+
+// Input for EvaluateXPathNodes.
+message EvaluateXPathNodesRequest {
+  string xml = 1;
+  string xpath = 2;
+  map<string, string> namespaces = 3;
+}
+
+// The matched nodes from an XPath expression, each serialized back to an
+// XML fragment (an element node's full open/close-tag subtree; a text node
+// as bare escaped text; an attribute node as `name="value"`), in document
+// order.
+message EvaluateXPathNodesResult {
+  repeated string nodes = 1;
+  // Convenience count, equal to len(nodes) whenever error is unset.
+  int32 count = 2;
+  Error error = 3;
+}
+
+// Input for EvaluateXPathString.
+message EvaluateXPathStringRequest {
+  string xml = 1;
+  string xpath = 2;
+  map<string, string> namespaces = 3;
+}
+
+// The XPath string-value of the expression's result, per the XPath 1.0
+// string() conversion rules (a node-set result takes the string-value of
+// its first node in document order; a number/boolean is converted to its
+// canonical string form).
+message EvaluateXPathStringResult {
+  string value = 1;
+  Error error = 2;
+}
+
+// Input for EvaluateXPathNumber.
+message EvaluateXPathNumberRequest {
+  string xml = 1;
+  string xpath = 2;
+  map<string, string> namespaces = 3;
+}
+
+// The XPath number-value of the expression's result, per the XPath 1.0
+// number() conversion rules.
+message EvaluateXPathNumberResult {
+  double value = 1;
+  // True when the XPath number() conversion produced NaN (e.g. the
+  // expression's string-value does not parse as a number); `value` is then
+  // meaningless (protobuf has no native NaN-safe double sentinel).
+  bool is_nan = 2;
+  Error error = 3;
+}
+
+// Input for EvaluateXPathBoolean.
+message EvaluateXPathBooleanRequest {
+  string xml = 1;
+  string xpath = 2;
+  map<string, string> namespaces = 3;
+}
+
+// The XPath boolean-value of the expression's result, per the XPath 1.0
+// boolean() conversion rules (a node-set is true iff non-empty; a number is
+// true iff non-zero and not NaN; a string is true iff non-empty).
+message EvaluateXPathBooleanResult {
+  bool value = 1;
+  Error error = 2;
+}
+
+// Input for CountXPath.
+message CountXPathRequest {
+  string xml = 1;
+  // Must select a node-set (e.g. "//item"), not a string/number/boolean
+  // expression — use EvaluateXPathNumber with an explicit count(...) for
+  // that. INVALID_XPATH if the expression's result is not a node-set.
+  string xpath = 2;
+  map<string, string> namespaces = 3;
+}
+
+// How many nodes `xpath` matched.
+message CountXPathResult {
+  int32 count = 1;
+  Error error = 2;
+}
+
+// Input for ExtractText.
+message ExtractTextRequest {
+  string xml = 1;
+  // Must select a node-set. Each matched node contributes one entry to
+  // `texts`, in document order.
+  string xpath = 2;
+  map<string, string> namespaces = 3;
+}
+
+// The text content of each node `xpath` matched — an element's concatenated
+// descendant text (XPath string-value semantics, applied per-node rather
+// than to the whole result as EvaluateXPathString does), an attribute's
+// value, or a text node's own text.
+message ExtractTextResult {
+  repeated string texts = 1;
+  int32 count = 2;
+  Error error = 3;
+}
+
+// Input for ExtractAttribute.
+message ExtractAttributeRequest {
+  string xml = 1;
+  // Must select attribute nodes (e.g. "//a/@href"), not elements —
+  // INVALID_XPATH if any matched node is not an attribute.
+  string xpath = 2;
+  map<string, string> namespaces = 3;
+}
+
+// The value of each attribute node `xpath` matched, in document order.
+message ExtractAttributeResult {
+  repeated string values = 1;
+  int32 count = 2;
+  Error error = 3;
+}
+
+// Input for TransformXslt.
+message TransformXsltRequest {
+  string xml = 1;
+  // An XSLT 1.0 stylesheet document. Capped at 1 MB. Its own DTD/external-
+  // entity loading is disabled under the same rule as `xml`, and its
+  // xsl:import/xsl:include of anything other than a self-contained
+  // stylesheet is not supported (no filesystem/network access from the
+  // stylesheet).
+  string xslt = 2;
+  // Optional top-level <xsl:param> overrides (name -> string value),
+  // applied the same way a caller would pass stylesheet parameters to any
+  // XSLT processor. A name with no matching top-level xsl:param in `xslt`
+  // is ignored, not an error.
+  map<string, string> params = 3;
+}
+
+// The transformed output.
+message TransformXsltResult {
+  // The transform's serialized output text (XML, HTML, or plain text,
+  // depending on the stylesheet's xsl:output/method and what it produces).
+  string output = 1;
+  // The effective output method the stylesheet declared or defaulted to:
+  // "xml" (the default when unspecified), "html", or "text".
+  string output_method = 2;
+  Error error = 3;
+}
+
+// Input for ValidateXsd.
+message ValidateXsdRequest {
+  string xml = 1;
+  // An XML Schema (XSD) document. Capped at 1 MB. Its own DTD/external-
+  // entity and remote xsd:import/xsd:include loading is disabled under the
+  // same rule as `xml` — a schema that only validates via a remote import
+  // is rejected as INVALID_XSD, not fetched.
+  string xsd = 2;
+}
+
+// One schema-conformance violation.
+message ValidationViolation {
+  string message = 1;
+  // 1-based line/column of the violation in `xml`, when the underlying
+  // validator reports one; 0 when unknown.
+  int32 line = 2;
+  int32 column = 3;
+}
+
+// Whether `xml` conforms to `xsd`, and every violation found when it does
+// not (validation continues past the first violation rather than stopping
+// there). `error` (INVALID_XML / INVALID_XSD) is distinct from a non-empty
+// `violations`: `error` means the inputs themselves couldn't be parsed or
+// compiled; `violations` means both parsed fine but `xml` doesn't conform.
+message ValidateXsdResult {
+  bool valid = 1;
+  repeated ValidationViolation violations = 2;
+  Error error = 3;
+}
+
+// Input for ExtractNamespaces.
+message ExtractNamespacesRequest {
+  string xml = 1;
+}
+
+// One namespace declaration found in the document.
+message NamespaceDeclaration {
+  // The declared prefix, or "" for a default (xmlns="...") declaration.
+  string prefix = 1;
+  string uri = 2;
+}
+
+// Every distinct namespace declaration (xmlns / xmlns:prefix attribute)
+// found anywhere in the document, de-duplicated by (prefix, uri) pair, in
+// document order of first occurrence.
+message ExtractNamespacesResult {
+  repeated NamespaceDeclaration namespaces = 1;
+  Error error = 2;
+}
+
+// Input for SelectFirstNode.
+message SelectFirstNodeRequest {
+  string xml = 1;
+  string xpath = 2;
+  map<string, string> namespaces = 3;
+}
+
+// The first node `xpath` matched, in document order.
+message SelectFirstNodeResult {
+  // False when `xpath` is a well-formed, valid expression that simply
+  // matched nothing (not an error — see EvaluateXPathNodesResult for the
+  // equivalent case there, which is likewise not an error).
+  bool found = 1;
+  // The matched node serialized to an XML fragment, using the same rules
+  // as EvaluateXPathNodesResult.nodes. Empty when found is false.
+  string node = 2;
+  Error error = 3;
+}
+
+// Input for XPathExists.
+message XPathExistsRequest {
+  string xml = 1;
+  string xpath = 2;
+  map<string, string> namespaces = 3;
+}
+
+// Whether `xpath` matches at least one node.
+message XPathExistsResult {
+  bool exists = 1;
+  Error error = 2;
+}

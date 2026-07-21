@@ -1,0 +1,148 @@
+name: christiangeorgelucas/xpath-tools
+version: 0.1.0
+language: typescript
+author: Christian George Lucas
+license: MIT
+description: >-
+  Composable Axiom nodes for deterministic XPath 1.0 querying, XSLT 1.0
+  transformation, and XSD schema validation of XML documents — distinct from
+  format-conversion/well-formedness tooling (dataformat-tools) and from JSON
+  querying (json-query-tools). Wraps goto100/xpath (MIT) + @xmldom/xmldom
+  (MIT) for XPath evaluation, Xcential's xsltjs (MIT, itself built on the
+  same xpath/xmldom stack) for XSLT transforms, and jameslan/libxml2-wasm
+  (MIT wrapper around MIT-licensed libxml2, compiled to WebAssembly — no
+  native toolchain) for XSD validation. Every node disables DTD loading and
+  external-entity resolution unconditionally (no XXE, no billion-laughs, no
+  remote document()/import/include fetch), bounds input size and namespace-
+  map entries, and returns a structured error on malformed XML/XPath/XSLT/XSD
+  rather than crashing. Stateless, offline, deterministic.
+nodes:
+    - name: EvaluateXPathNodes
+      description: >-
+        Evaluate an XPath 1.0 expression against an XML document and return
+        every matched node, serialized back to an XML fragment, in document
+        order. Works for any node type an XPath step can select (elements,
+        attributes, text). An expression that is syntactically invalid, or
+        that evaluates to a non-node-set (a string/number/boolean instead),
+        is INVALID_XPATH; matching nothing is not an error (nodes/count are
+        just empty/0).
+      input: EvaluateXPathNodesRequest
+      output: EvaluateXPathNodesResult
+    - name: EvaluateXPathString
+      description: >-
+        Evaluate an XPath 1.0 expression and return its result converted to
+        a string per the XPath string() rules (a node-set takes the
+        string-value of its first node in document order; number/boolean
+        convert to their canonical string form). Use this for expressions
+        like "string(//title)" or "concat(//a, '-', //b)"; use ExtractText
+        instead when you want every matched node's text, not just the
+        first.
+      input: EvaluateXPathStringRequest
+      output: EvaluateXPathStringResult
+    - name: EvaluateXPathNumber
+      description: >-
+        Evaluate an XPath 1.0 expression and return its result converted to
+        a number per the XPath number() rules, e.g. "count(//item)",
+        "//price + //tax", or "sum(//item/@qty)". is_nan is set when the
+        conversion produces NaN (protobuf's double has no native NaN-safe
+        sentinel).
+      input: EvaluateXPathNumberRequest
+      output: EvaluateXPathNumberResult
+    - name: EvaluateXPathBoolean
+      description: >-
+        Evaluate an XPath 1.0 expression and return its result converted to
+        a boolean per the XPath boolean() rules, e.g. "//status = 'active'"
+        or "boolean(//error)". Use XPathExists instead for the common "does
+        any node match" case — it is the same evaluation but named for that
+        intent.
+      input: EvaluateXPathBooleanRequest
+      output: EvaluateXPathBooleanResult
+    - name: CountXPath
+      description: >-
+        Count how many nodes a node-set XPath expression matches (e.g.
+        "//item[@active='true']"), without serializing the matched nodes
+        themselves — cheaper than EvaluateXPathNodes when only the count is
+        needed. INVALID_XPATH if the expression does not evaluate to a
+        node-set (use EvaluateXPathNumber with an explicit count(...) for a
+        pre-aggregated numeric expression instead).
+      input: CountXPathRequest
+      output: CountXPathResult
+    - name: ExtractText
+      description: >-
+        Extract the text content of every node a node-set XPath expression
+        matches, one string per matched node in document order — an
+        element's concatenated descendant text, an attribute's value, or a
+        text node's own text, applying XPath string-value conversion
+        per-node rather than to the whole result set (contrast
+        EvaluateXPathString, which returns only the first match's value as
+        a single string).
+      input: ExtractTextRequest
+      output: ExtractTextResult
+    - name: ExtractAttribute
+      description: >-
+        Extract the value of every attribute node a node-set XPath
+        expression matches, e.g. "//a/@href" to pull every link target in a
+        document, one value per matched attribute in document order.
+        INVALID_XPATH if any matched node is not an attribute (use
+        EvaluateXPathNodes/ExtractText for element or text selections).
+      input: ExtractAttributeRequest
+      output: ExtractAttributeResult
+    - name: TransformXslt
+      description: >-
+        Transform an XML document with a caller-supplied XSLT 1.0
+        stylesheet, returning the serialized output and the stylesheet's
+        effective output method (xml/html/text). Optional params override
+        the stylesheet's top-level xsl:param values. The stylesheet's own
+        DTD/external-entity loading is disabled under the same rule as the
+        source document, and it cannot import/include anything outside
+        itself or call document() (no filesystem/network access from the
+        stylesheet — a document()/import/include is rejected, never
+        fetched). A malformed stylesheet or a runtime transform error is
+        INVALID_XSLT. Two tested engine limitations, not spec gaps of ours:
+        xsl:apply-templates is rejected outright (INVALID_XSLT) rather than
+        run, because it hangs the underlying engine indefinitely rather than
+        completing — rewrite using xsl:for-each and xsl:call-template
+        instead; and xsl:value-of select="." (the bare self shorthand)
+        returns the escaped node markup instead of its text — use
+        select="self::node()" or select="text()", both of which work
+        correctly.
+      input: TransformXsltRequest
+      output: TransformXsltResult
+    - name: ValidateXsd
+      description: >-
+        Validate an XML document against a caller-supplied XSD schema and
+        report every conformance violation (message plus line/column when
+        the validator provides one) rather than only the first. `error` is
+        distinct from `violations`: `error` (INVALID_XML/INVALID_XSD) means
+        the document or schema itself couldn't be parsed/compiled;
+        `valid`/`violations` means both parsed fine but the document does
+        not conform to the schema. The schema's own DTD/external-entity and
+        remote xsd:import/xsd:include loading is disabled under the same
+        rule as every other node in this package.
+      input: ValidateXsdRequest
+      output: ValidateXsdResult
+    - name: ExtractNamespaces
+      description: >-
+        Extract every distinct namespace declaration (xmlns / xmlns:prefix
+        attribute) found anywhere in an XML document, de-duplicated by
+        (prefix, uri) pair, in document order of first occurrence. Useful
+        for discovering the prefix -> URI map to pass as `namespaces` to
+        this package's other nodes when querying an unfamiliar document.
+      input: ExtractNamespacesRequest
+      output: ExtractNamespacesResult
+    - name: SelectFirstNode
+      description: >-
+        Select only the first node (in document order) a node-set XPath
+        expression matches, serialized to an XML fragment — the common
+        "give me just one" case without paying to serialize every match the
+        way EvaluateXPathNodes does. found is false (not an error) when the
+        expression is valid but matches nothing.
+      input: SelectFirstNodeRequest
+      output: SelectFirstNodeResult
+    - name: XPathExists
+      description: >-
+        Check whether a node-set XPath expression matches at least one node
+        in the document — a cheap existence check that short-circuits on
+        the first match instead of collecting every one.
+      input: XPathExistsRequest
+      output: XPathExistsResult
