@@ -1,6 +1,6 @@
 # xpath-tools
 
-Composable [Axiom](https://axiom.co) nodes for deterministic **XPath 1.0 querying**,
+Composable [Axiom](https://axiomide.com) nodes for deterministic **XPath 1.0 querying**,
 **XSLT 1.0 transformation**, and **XSD schema validation** of XML documents.
 
 Built for the Axiom marketplace under the `christiangeorgelucas` handle. Distinct
