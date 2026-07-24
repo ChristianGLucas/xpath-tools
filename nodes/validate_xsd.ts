@@ -1,11 +1,7 @@
 import { spawn } from 'child_process';
 import { ValidateXsdRequest, ValidateXsdResult, ValidationViolation } from '../gen/messages_pb';
 import { AxiomContext } from '../gen/axiomContext';
-import { buildErrorMsg, NodeError, MAX_XML_BYTES, MAX_XSD_BYTES } from './lib';
-
-function byteLength(text: string): number {
-  return Buffer.byteLength(text, 'utf8');
-}
+import { buildErrorMsg, NodeError } from './lib';
 
 // The absolute path to libxml2-wasm's ESM entry point, resolved via this
 // already-running process's own (perfectly ordinary) module resolution — so
@@ -151,14 +147,8 @@ export async function validateXsd(ax: AxiomContext, input: ValidateXsdRequest): 
     if (xmlText.trim().length === 0) {
       throw new NodeError('INVALID_XML', 'xml is empty');
     }
-    if (byteLength(xmlText) > MAX_XML_BYTES) {
-      throw new NodeError('TOO_LARGE', `xml exceeds ${MAX_XML_BYTES} bytes`);
-    }
     if (xsdText.trim().length === 0) {
       throw new NodeError('INVALID_XSD', 'xsd is empty');
-    }
-    if (byteLength(xsdText) > MAX_XSD_BYTES) {
-      throw new NodeError('TOO_LARGE', `xsd exceeds ${MAX_XSD_BYTES} bytes`);
     }
 
     const workerResult = await runXsdWorker(xmlText, xsdText);

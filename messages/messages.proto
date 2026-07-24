@@ -38,7 +38,9 @@ message Error {
   //                        `xpath`, a namespace prefix map entry with an
   //                        empty prefix or URI, or an unresolvable prefix
   //                        used in the expression).
-  //   TOO_LARGE          — an input exceeds its documented size bound.
+  //   TOO_LARGE          — `xml` nests deeper than the documented depth
+  //                        bound (a stack-safety/cost bound, not a payload-
+  //                        size limit — see the `xml` field doc below).
   string code = 1;
   // Human-readable detail. Always non-empty when `code` is set.
   string message = 2;
@@ -52,16 +54,20 @@ message Error {
 //                internal or external entity is ever expanded, and no
 //                external DTD/schema/document() URL is ever fetched — this
 //                closes XXE and billion-laughs at the parser, unconditionally,
-//                for every node in this package. Capped at 3 MB (comfortably
-//                under Axiom's ~4 MiB node transport limit).
-//   xpath      — an XPath 1.0 expression, capped at 10,000 characters.
+//                for every node in this package. No package-level byte-size
+//                cap (the platform bounds payload size); nesting depth is
+//                capped at 1,000 levels (TOO_LARGE) — a stack-safety/cost
+//                bound on XPath's "//" traversal, not a size limit.
+//   xpath      — an XPath 1.0 expression, capped at 10,000 characters (a
+//                precautionary bound on expression-evaluation recursion
+//                depth, not a payload-size limit).
 //   namespaces — an optional prefix -> namespace-URI map so `xpath` can use
 //                namespace-qualified steps (e.g. {"a": "urn:example:a"} lets
-//                the expression use "a:Foo"). Capped at 50 entries. A prefix
-//                used in `xpath` but absent from this map, or a mapped
-//                prefix never used in `xpath`, is not itself an error — only
-//                an unresolvable prefix actually referenced fails as
-//                INVALID_ARGUMENT.
+//                the expression use "a:Foo"). No package-level entry-count
+//                cap. A prefix used in `xpath` but absent from this map, or
+//                a mapped prefix never used in `xpath`, is not itself an
+//                error — only an unresolvable prefix actually referenced
+//                fails as INVALID_ARGUMENT.
 
 // Input for EvaluateXPathNodes.
 message EvaluateXPathNodesRequest {
@@ -184,8 +190,9 @@ message ExtractAttributeResult {
 // Input for TransformXslt.
 message TransformXsltRequest {
   string xml = 1;
-  // An XSLT 1.0 stylesheet document. Capped at 1 MB. Its own DTD/external-
-  // entity loading is disabled under the same rule as `xml`, and its
+  // An XSLT 1.0 stylesheet document. No package-level byte-size cap (the
+  // platform bounds payload size). Its own DTD/external-entity loading is
+  // disabled under the same rule as `xml`, and its
   // xsl:import/xsl:include of anything other than a self-contained
   // stylesheet is not supported (no filesystem/network access from the
   // stylesheet).
@@ -211,8 +218,9 @@ message TransformXsltResult {
 // Input for ValidateXsd.
 message ValidateXsdRequest {
   string xml = 1;
-  // An XML Schema (XSD) document. Capped at 1 MB. Its own DTD/external-
-  // entity and remote xsd:import/xsd:include loading is disabled under the
+  // An XML Schema (XSD) document. No package-level byte-size cap (the
+  // platform bounds payload size). Its own DTD/external-entity and remote
+  // xsd:import/xsd:include loading is disabled under the
   // same rule as `xml` — a schema that only validates via a remote import
   // is rejected as INVALID_XSD, not fetched.
   string xsd = 2;

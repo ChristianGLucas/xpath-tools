@@ -40,20 +40,28 @@ import { DOMParser, XMLSerializer } from '@xmldom/xmldom';
 import * as xpath from 'xpath';
 import { Error as ErrorMsg } from '../gen/messages_pb';
 
-// 3 MB, not the rounder 4/5 MB: Axiom's node gRPC transport caps a message
-// at ~4 MiB, and that ceiling is invisible to local `axiom dev`/unit
-// testing (it only bites a deployed node) — 3 MB leaves a safe margin below
-// it rather than risk a payload the platform itself truncates or rejects
-// before this node's own size check ever runs.
-export const MAX_XML_BYTES = 3 * 1024 * 1024;
-export const MAX_XSLT_BYTES = 1 * 1024 * 1024; // 1 MB.
-export const MAX_XSD_BYTES = 1 * 1024 * 1024; // 1 MB.
-export const MAX_XPATH_LEN = 10000;
-export const MAX_NAMESPACE_ENTRIES = 50;
-// Generous relative to any real-world document (a few dozen levels at most);
-// tight enough to keep xpath.select's quadratic "//" traversal well under a
-// second. See the module doc comment above for the measurements.
+// Payload size (raw XML/XSLT/XSD byte length, namespace-map entry count) is
+// the platform's job, not this package's, and every guard that only bounded
+// THAT has been removed. Two bounds remain, and neither is a size guard:
+//
+// MAX_XML_DEPTH: xpath.select's "//" (descendant-or-self) traversal is
+// quadratic in document nesting depth (measured: ~32ms at 1,000 levels,
+// ~2.3s at 8,000, extrapolating to minutes at 100,000) even though parsing
+// itself stays fast at that depth — a genuine algorithmic-complexity bound,
+// not a memory ceiling. Generous relative to any real-world document (a few
+// dozen levels at most); tight enough to keep that traversal well under a
+// second.
 export const MAX_XML_DEPTH = 1000;
+// MAX_XPATH_LEN: the xpath library's own parser (XPathParser.parse) is a
+// table-driven shift-reduce parser with an explicit array stack, not native
+// recursion, so parsing itself cannot stack-overflow regardless of length.
+// Evaluating the resulting AST, however, is done via each node type's own
+// recursive .evaluate() method, so a pathologically deep expression (nested
+// parens/predicates) could still risk a native stack overflow during
+// EVALUATION — length is an imperfect but cheap proxy for that depth in the
+// absence of a dedicated structural scan, so this is kept as a
+// precautionary bound rather than removed outright.
+export const MAX_XPATH_LEN = 10000;
 
 /** A structured, deterministic failure — carries the same `code` vocabulary documented on the proto Error message. */
 export class NodeError extends Error {
@@ -150,23 +158,18 @@ export function checkNestingDepth(xml: string, maxDepth: number = MAX_XML_DEPTH)
 }
 
 export interface ParseXmlOptions {
-  maxBytes?: number;
-  /** Error code to use for a size violation. Defaults to 'TOO_LARGE'. */
+  /** Field name to use in an "is empty" error message. Defaults to 'xml'. */
   label?: string;
 }
 
 /**
- * Parse XML text into a Document, enforcing the size and nesting-depth
- * bounds and treating BOTH a thrown parse error and any accumulated
- * DOMParser onError diagnostic (e.g. an unresolved entity reference, which
- * xmldom reports rather than throws) as INVALID_XML — see the module doc
- * comment for why an unresolved entity is never silently substituted.
+ * Parse XML text into a Document, enforcing the nesting-depth bound and
+ * treating BOTH a thrown parse error and any accumulated DOMParser onError
+ * diagnostic (e.g. an unresolved entity reference, which xmldom reports
+ * rather than throws) as INVALID_XML — see the module doc comment for why
+ * an unresolved entity is never silently substituted.
  */
 export function parseXmlDom(xmlText: string, options: ParseXmlOptions = {}): any {
-  const maxBytes = options.maxBytes ?? MAX_XML_BYTES;
-  if (byteLength(xmlText) > maxBytes) {
-    throw new NodeError('TOO_LARGE', `${options.label ?? 'xml'} exceeds ${maxBytes} bytes`);
-  }
   if (xmlText.trim().length === 0) {
     throw new NodeError('INVALID_XML', `${options.label ?? 'xml'} is empty`);
   }
@@ -203,13 +206,11 @@ export function checkXPathExpr(expr: string): void {
   }
 }
 
-/** Validate a caller-supplied namespace prefix -> URI map. */
+/** Validate a caller-supplied namespace prefix -> URI map. No package-level
+ * entry-count cap (the platform bounds payload size); each entry is O(1) to
+ * check. */
 export function checkNamespaces(namespaces: Record<string, string>): void {
-  const entries = Object.entries(namespaces);
-  if (entries.length > MAX_NAMESPACE_ENTRIES) {
-    throw new NodeError('INVALID_ARGUMENT', `namespaces exceeds ${MAX_NAMESPACE_ENTRIES} entries`);
-  }
-  for (const [prefix, uri] of entries) {
+  for (const [prefix, uri] of Object.entries(namespaces)) {
     if (!prefix || !uri) {
       throw new NodeError('INVALID_ARGUMENT', 'a namespaces entry has an empty prefix or uri');
     }

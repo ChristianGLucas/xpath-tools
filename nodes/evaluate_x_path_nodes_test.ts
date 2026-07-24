@@ -72,11 +72,11 @@ describe('EvaluateXPathNodes', () => {
     }
   });
 
-  it('rejects XML over the 3 MB size bound as TOO_LARGE', () => {
+  it('handles a large flat document without crashing (payload-size limits are the platform\'s job, not this node\'s)', () => {
     const big = '<r>' + 'a'.repeat(3 * 1024 * 1024 + 1) + '</r>';
     const result = evaluateXPathNodes(testContext, req(big, '//r'));
-    expect(result.getError()).toBeDefined();
-    expect(result.getError()!.getCode()).toBe('TOO_LARGE');
+    expect(result.getError()).toBeUndefined();
+    expect(result.getCount()).toBe(1);
   });
 
   it('bounds pathological nesting depth instead of hanging', () => {

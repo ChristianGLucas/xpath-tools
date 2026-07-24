@@ -1,7 +1,7 @@
 import { spawn } from 'child_process';
 import { TransformXsltRequest, TransformXsltResult } from '../gen/messages_pb';
 import { AxiomContext } from '../gen/axiomContext';
-import { parseXmlDom, mapToObject, buildErrorMsg, MAX_XSLT_BYTES, NodeError } from './lib';
+import { parseXmlDom, mapToObject, buildErrorMsg, NodeError } from './lib';
 import { rejectUnsafeDispatch, detectOutputSpec, normalizeOutput, OutputSpec } from './xslt_lib';
 
 // Absolute paths to xsltjs's and @xmldom/xmldom's entry points, resolved via
@@ -141,19 +141,19 @@ export async function transformXslt(ax: AxiomContext, input: TransformXsltReques
   try {
     const xmlText = input.getXml();
     const xsltText = input.getXslt();
-    // parseXmlDom (size/depth-bounded, XXE-safe) is used here purely for the
+    // parseXmlDom (depth-bounded, XXE-safe) is used here purely for the
     // static rejectUnsafeDispatch/detectOutputSpec checks below — these run
     // in THIS process because they are simple, fast, non-hanging XPath
     // lookups, not the actual transform.
     parseXmlDom(xmlText);
     let xsltDoc: any;
     try {
-      xsltDoc = parseXmlDom(xsltText, { maxBytes: MAX_XSLT_BYTES, label: 'xslt' });
+      xsltDoc = parseXmlDom(xsltText, { label: 'xslt' });
     } catch (e) {
-      // parseXmlDom always reports INVALID_XML/TOO_LARGE — remap a well-
-      // formedness failure specifically on the STYLESHEET argument to
-      // INVALID_XSLT, which is what this node's Error.code vocabulary
-      // documents for a malformed stylesheet.
+      // parseXmlDom always reports INVALID_XML — remap a well-formedness
+      // failure specifically on the STYLESHEET argument to INVALID_XSLT,
+      // which is what this node's Error.code vocabulary documents for a
+      // malformed stylesheet.
       if (e instanceof NodeError && e.code === 'INVALID_XML') {
         throw new NodeError('INVALID_XSLT', e.message);
       }
